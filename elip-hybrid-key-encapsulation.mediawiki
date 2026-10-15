@@ -135,7 +135,7 @@ A recipient first calls <code>KeyGen</code> to generate a key pair:
 <code>KeyGen</code> draws <code>msk</code> uniformly at random to keep the description self-contained.
 In practice, wallets derive <code>msk</code> deterministically under the key derivation rules of the application, so that a wallet restored from its backup recomputes <code>msk</code> and recovers its outputs.
 This document does not fix that derivation: any derivation is acceptable if <code>msk</code> is indistinguishable from a uniformly random 32-byte string to anyone who does not hold the wallet's secret, and the [[#security|Security]] argument is then unchanged.
-For example, Liquid wallets derive a blinding key per scriptPubKey from a master blinding key ([https://github.com/satoshilabs/slips/blob/master/slip-0077.md SLIP-77]), and watch-only wallets obtain the same derivation from CT descriptors ([https://github.com/ElementsProject/ELIPs/blob/main/elip-0150.mediawiki ELIP 150]); [[elip-hke-confidential-transactions.mediawiki|<code>elip-hke-confidential-transactions.mediawiki</code>]] derives <code>msk</code> in that style.
+For example, Liquid wallets derive a blinding key per scriptPubKey from a master blinding key ([https://github.com/satoshilabs/slips/blob/master/slip-0077.md SLIP-77]), and watch-only wallets obtain the same derivation from CT descriptors ([https://github.com/ElementsProject/ELIPs/blob/main/elip-0150.mediawiki ELIP 150]).
 
 ===Encapsulation===
 
@@ -216,7 +216,6 @@ Both <code>E</code> and <code>B</code> are public, so a CRQC recovers the seed o
 
 Replacing <code>ECDH(e, B)</code> with HKE and using its shared secret <code>K</code> as the range-proof seed requires the recipient's address to carry the ML-KEM encapsulation key <code>ek</code> alongside <code>B</code>, and each confidential output to carry the ciphertext <code>c</code> alongside <code>E</code>.
 The range-proof code is unchanged, since it takes a 32-byte seed either way.
-The concrete proposal is [[elip-hke-confidential-transactions.mediawiki|<code>elip-hke-confidential-transactions.mediawiki</code>]].
 
 ===BIP47 reusable payment codes===
 

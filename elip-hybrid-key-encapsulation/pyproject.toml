@@ -1,4 +1,4 @@
-# Lets other PoCs (e.g. ../elip-hke-confidential-transactions) depend on `hke` via `pip install -e ../elip-hybrid-key-encapsulation`.
+# Lets other code depend on `hke` via `pip install -e`.
 [build-system]
 requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"

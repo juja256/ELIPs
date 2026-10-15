@@ -17,7 +17,7 @@ python3 -m venv .venv
 
 - `hke.py` — the spec, function by function.
 - `secp256k1lab/` — vendored copy of secp256k1lab (see below); not modified.
-- `pyproject.toml` — packages `hke` so other PoCs can depend on it (`pip install -e ../elip-hybrid-key-encapsulation`, as in `../elip-hke-confidential-transactions/requirements.txt`).
+- `pyproject.toml` — packages `hke` so that other code can depend on it with `pip install -e`.
 - `test_hke.py` — correctness and invalid-ciphertext tests.
 - `gen_vectors.py` — writes `vectors.json` from fixed, label-derived inputs.
 - `vectors.json` — the test vectors.
