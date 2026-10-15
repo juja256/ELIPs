@@ -1,0 +1,13 @@
+# Lets other PoCs (e.g. ../elip-hke-confidential-transactions) depend on `hke` via `pip install -e ../elip-hybrid-key-encapsulation`.
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "elip-hke"
+version = "0.0.0"
+requires-python = ">=3.11"
+dependencies = ["kyber-py==1.2.0"]
+
+[tool.setuptools]
+py-modules = ["hke"]

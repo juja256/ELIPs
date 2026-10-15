@@ -1,0 +1,74 @@
+# ELIP HKE reference implementation
+
+Python reference implementation of the Specification section of `../elip-hybrid-key-encapsulation.mediawiki`.
+It is for checking the spec, not for production: neither secp256k1lab nor `kyber-py` is constant time.
+Requires Python 3.11 or later (secp256k1lab's minimum).
+
+## Run
+
+```sh
+cd elip-hybrid-key-encapsulation
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python -m pytest -v
+```
+
+## Files
+
+- `hke.py` — the spec, function by function.
+- `secp256k1lab/` — vendored copy of secp256k1lab (see below); not modified.
+- `pyproject.toml` — packages `hke` so other PoCs can depend on it (`pip install -e ../elip-hybrid-key-encapsulation`, as in `../elip-hke-confidential-transactions/requirements.txt`).
+- `test_hke.py` — correctness and invalid-ciphertext tests.
+- `gen_vectors.py` — writes `vectors.json` from fixed, label-derived inputs.
+- `vectors.json` — the test vectors.
+- `test_vectors.py` — checks the implementation against `vectors.json`, and that the file matches what `gen_vectors.py` produces.
+- `fetch_acvp.py` — downloads NIST's ACVP ML-KEM-768 test vectors into `acvp/`, pinned to an ACVP-Server commit.
+- `test_mlkem_acvp.py` — checks the ML-KEM-768 backend against `acvp/`.
+
+## Primitives
+
+The reference implements only the HKE layer itself; both primitives come from canonical, pinned sources.
+
+- **secp256k1:** a vendored copy of [secp256k1lab](https://github.com/secp256k1lab/secp256k1lab) at version 1.0.0 (commit [`44dc4bd893b8f03e621585e3bf255253e0e0fbfb`](https://github.com/secp256k1lab/secp256k1lab/commit/44dc4bd893b8f03e621585e3bf255253e0e0fbfb)), imported the same way as in the BIP-352 and BIP-374 reference implementations.
+  The vendored source files are byte-identical to the copy in `bitcoin/bips/bip-0352/secp256k1lab` (same git blob hashes).
+  `k*P` is `GE.__rmul__`, `cbytes` is `GE.to_bytes_compressed`, `lift` is `GE.from_bytes_compressed` behind explicit length, prefix and `X < p` checks (the library asserts rather than raises on length), and `H_t` is `util.tagged_hash`.
+- **ML-KEM-768:** [`kyber-py`](https://github.com/GiacomoPope/kyber-py) 1.2.0 (pinned in `requirements.txt`), a direct transcription of FIPS 203.
+  No BIP ships ML-KEM, so there is no BIP convention to follow here.
+  It passes every ML-KEM-768 case in NIST's ACVP vectors for the functions HKE uses: 25 `keyGen` (`KeyGen_internal(d, z)`), 25 `encapsulation` (`Encaps_internal(ek, m)`), 10 `decapsulation` (5 with a modified ciphertext, i.e. implicit rejection) and 10 `encapsulationKeyCheck` (`CheckEK`).
+  The ACVP vectors are the conformance test for FIPS 203, so any implementation that passes them computes the same function on these inputs.
+
+## Correspondence with the pseudocode
+
+| Spec | `hke.py` |
+|---|---|
+| `cbytes`, `int`, `lift` | `cbytes`, `int_`, `lift` (returns `None` on failure) |
+| `H_t`, `H_blind`, `H_kem-d`, `H_kem-z`, `H_ecdh`, `H_seed` | `H`, `H_blind`, `H_kem_d`, `H_kem_z`, `H_ecdh`, `H_seed` |
+| `KEM.KeyGen_internal`, `KEM.Encaps_internal`, `KEM.Decaps`, `L_ek`, `L_c` | `KEM.*` (alias `ML_KEM_768`), backed by `kyber-py` |
+| `KEM.CheckEK` | `KEM.CheckEK`, implemented directly from FIPS 203 §7.2 and checked against NIST ACVP |
+| `expandDecapsulationKey`, `KeyGen`, `Encaps`, `EncapsDerand`, `Decaps` | same names, same step order |
+| "fail" | `raise HKEFailure` |
+
+## Tests
+
+- **Correctness:** round trip `Decaps(Encaps(B_bytes, ek)) = K`, deterministic `expandDecapsulationKey`, object sizes, randomized `Encaps`.
+- **Invalid public key:** every class of invalid `B_bytes` (empty, `O`, bad prefix, uncompressed, wrong length, `X >= p`, `X` not on the curve) makes `Encaps` raise `HKEFailure`.
+- **Primitive wiring:** generator encodings, `lift`/`cbytes` round trip, `lift` rejecting 65-byte uncompressed and hybrid encodings and a non-canonical `X = p + 1` (which reduces to a valid x coordinate), and the tagged hash equal to the BIP340 formula for every tag.
+- **Encapsulation key check:** `Encaps` rejects an `ek` of the wrong length or with a coefficient `>= q`; `CheckEK` agrees with `kyber-py` on boundary values.
+- **Invalid ciphertext, implicit rejection:** a tampered `c`, a different valid `E`, a ciphertext for another recipient, or `E` and `c` taken from different encapsulations all decapsulate without error to a wrong `K`; rejection is deterministic.
+- **Invalid ciphertext, explicit failure:** wrong `|c|` and every class of invalid `E_bytes` (empty, `O`, bad prefix, wrong length, `X >= p`, `X` not on the curve) raise `HKEFailure`.
+
+## Test vectors
+
+`vectors.json` has four groups; byte strings and scalars are lowercase hex, scalars 32-byte big-endian.
+
+| Group | Inputs | Expected |
+|---|---|---|
+| `valid` | `msk`, `e`, `m` | `b`, `B`, `ek`, `dk`, `E_bytes`, `c`, `K_c`, `K_q`, `K` |
+| `implicit_rejection` | `msk`, `E_bytes`, `c` | the `K` that `Decaps` returns |
+| `decaps_failure` | `msk`, `E_bytes`, `c` | `Decaps` fails |
+| `encaps_failure` | `B`, `ek`, `e`, `m` | `EncapsDerand` fails |
+
+Regenerate with `.venv/bin/python gen_vectors.py`; output is deterministic.
+
+During development, the secp256k1 side of the vectors was cross-checked once against a hand-written pure-Python implementation and libsecp256k1, in addition to secp256k1lab.
+`K_q` and the implicit-rejection keys were additionally cross-checked once against PQClean's ML-KEM-768 (via `pqcrypto`).
