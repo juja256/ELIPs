@@ -21,13 +21,13 @@ A cryptographically relevant quantum computer (CRQC) poses a threat to a large b
 Particularly, it solves the Computational Diffie-Hellman (CDH) problem, so the protocols that use Elliptic Curve Diffie-Hellman (ECDH) key agreement are vulnerable.
 The retroactive CRQC attacks typically affect the privacy of users in such protocols.
 This document specifies '''HKE''', a hybrid key encapsulation built on top of the QSF framework from [https://eprint.iacr.org/2024/039 X-Wing] that derives a 32-byte secret <code>K</code> from two parts: an ECDH on <code>secp256k1</code> and a post-quantum key-encapsulation mechanism [https://csrc.nist.gov/pubs/fips/203/final <code>ML-KEM-768</code>], combined so that <code>K</code> remains pseudorandom even if either component is compromised.
-Compared to <code>ML-KEM-768</code> deployment in isolation, HKE provides a classic ECDH fallback if some advances in lattice-based cryptography become available.
 
 ===Copyright===
 
 This document and its reference code are licensed under the BSD-2-Clause License.
 The vendored copy of secp256k1lab keeps its own MIT License.
 
+<span id="motivation"></span>
 ===Motivation===
 
 A large body of deployed protocols share the same pattern: a sender performs a one-shot ECDH to a recipient's long-term public <code>secp256k1</code> key, derives a secret from it, and publishes something that depends on that secret on-chain.
@@ -50,9 +50,7 @@ Because every range proof is published on-chain, an attacker equipped with a CRQ
 ==Description==
 
 ''HKE'' proposed in this ELIP is a slightly modified instantiation of '''QSF''' (''Quantum Superiority Fighter'') — the generic hybrid-KEM combiner framework the [https://eprint.iacr.org/2024/039 X-Wing paper] specifies.
-While ''X-Wing'' paper instantiates QSF with <code>X25519 + ML-KEM-768 + SHA3</code>, this proposal instead does it with <code>secp256k1 + ML-KEM-768 + SHA256</code>, so that the classical component uses the curve that existing wallets already use.
-<code>ML-KEM-768</code> is standardized in FIPS 203 at NIST category 3.
-Its main alternative, CSIDH, needs public values of about 1 KB at the same category ([https://eprint.iacr.org/2020/1520 SQALE]), close to the 1184-byte encapsulation key and 1088-byte ciphertext of <code>ML-KEM-768</code>, and its group action is orders of magnitude slower.
+While the ''X-Wing'' paper instantiates QSF with <code>X25519 + ML-KEM-768 + SHA3</code>, this proposal instead does it with <code>secp256k1 + ML-KEM-768 + SHA256</code> (see [[#rationale|Rationale]]).
 
 QSF combines the two shared secrets with the classical leg's ciphertext (the ephemeral point <code>E</code>, defined in Specification) and public key <code>B</code>.
 This proposal additionally hashes the PQ ciphertext <code>c</code> and encapsulation key <code>ek</code> as canonical public context.
@@ -64,8 +62,8 @@ Both parts of the recipient's key are derived from one 32-byte secret <code>msk<
 
 ===Notation===
 
-* The group is <code>secp256k1</code>, prime order <code>n</code>, generator <code>G</code>. <code>k*P</code> is scalar multiplication; <code>O</code> is the point at infinity.
-* <code>cbytes(P)</code>: the 33-byte compressed SEC1 encoding of a point <code>P</code>.
+* The group is <code>secp256k1</code> ([https://www.secg.org/sec2-v2.pdf SEC2], §2.4.1), prime order <code>n</code>, generator <code>G</code>. <code>k*P</code> is scalar multiplication; <code>O</code> is the point at infinity.
+* <code>cbytes(P)</code>: the 33-byte compressed SEC1 encoding of a point <code>P</code> ([https://www.secg.org/sec1-v2.pdf SEC1], §2.3.3).
 * <code>int(x)</code>: the integer with big-endian encoding <code>x</code>.
 * <code>lift(x)</code>: the point <code>P</code> with <code>cbytes(P) = x</code>. It fails unless <code>|x| = 33</code>, <code>x[0]</code> is <code>0x02</code> or <code>0x03</code>, <code>X = int(x[1:33]) < p</code> (the field size), and <code>X</code> is the x coordinate of a point on the curve. <code>X</code> MUST NOT be reduced modulo <code>p</code>. If these hold, <code>P</code> is the point with x coordinate <code>X</code> whose <code>Y</code> is even for <code>0x02</code> and odd for <code>0x03</code>. <code>lift</code> never returns <code>O</code>, and <code>cbytes(lift(x)) = x</code> whenever <code>lift</code> succeeds.
 * '''Tagged hash''', as defined in [https://github.com/bitcoin/bips/blob/master/bip-0340.mediawiki BIP340]. For an ASCII tag <code>t</code>, <code>H_t(x) = SHA256(SHA256(t) || SHA256(t) || x)</code>.
@@ -105,21 +103,20 @@ This document uses the following tagged hash functions:
 
 ===KEM interface===
 
-For the <code>ML-KEM-768</code> parameter set of [https://csrc.nist.gov/pubs/fips/203/final FIPS 203], the KEM interface is as follows:
+HKE uses <code>ML-KEM-768</code>, the category-3 parameter set of [https://csrc.nist.gov/pubs/fips/203/final FIPS 203], through the functions below, written with the prefix <code>KEM</code>.
+Names follow FIPS 203, except that its shared secret key <code>K</code> is called <code>K_q</code> here, because <code>K</code> is the output of HKE.
 
-* <code>KeyGen_internal(d, z) -> (ek, dk)</code>, where <code>d</code> and <code>z</code> are 32-byte strings
-* <code>Encaps_internal(ek, m) -> (K_q, c)</code>, where <code>m</code> is a 32-byte string and <code>|K_q| = 32</code>
-* <code>Decaps(dk, c) -> K_q</code>
-* <code>CheckEK(ek) -> bool</code>: the encapsulation key check of FIPS 203, §7.2. It returns true iff <code>|ek| = L_ek</code> (type check) and every 12-bit coefficient decoded from the first <code>L_ek - 32</code> bytes of <code>ek</code> is less than <code>q = 3329</code> (modulus check).
-
-<code>ML-KEM-768</code> has public key size <code>L_ek = 1184</code>, and ciphertext size <code>L_c = 1088</code>.
+* <code>KEM.KeyGen_internal(d, z) -> (ek, dk)</code> is <code>ML-KEM.KeyGen_internal</code> (FIPS 203, Algorithm 16). It takes two 32-byte seeds, <code>d</code> for the key pair and the implicit-rejection value <code>z</code>, and returns the encapsulation key <code>ek</code> of <code>L_ek = 1184</code> bytes and the decapsulation key <code>dk</code> of 2400 bytes.
+* <code>KEM.Encaps_internal(ek, m) -> (K_q, c)</code> is <code>ML-KEM.Encaps_internal</code> (Algorithm 17). It takes <code>ek</code> and 32 bytes of randomness <code>m</code>, and returns the 32-byte shared secret key <code>K_q</code> and the ciphertext <code>c</code> of <code>L_c = 1088</code> bytes.
+* <code>KEM.Decaps(dk, c) -> K_q</code> is <code>ML-KEM.Decaps</code> (Algorithm 21). FIPS 203 requires its inputs to be checked (§7.3): [[#decapsulation|Decapsulation]] checks <code>|c| = L_c</code>, and <code>dk</code> passes the decapsulation key checks because <code>KEM.KeyGen_internal</code> computed it.
+* <code>KEM.CheckEK(ek) -> bool</code> is the encapsulation key check of FIPS 203 (§7.2), which has no function name there. It returns true iff <code>|ek| = L_ek</code> (type check) and every 12-bit coefficient decoded from the first <code>L_ek - 32</code> bytes of <code>ek</code> is less than <code>q = 3329</code> (modulus check).
 
 ===Key generation===
 
 <pre>expandDecapsulationKey(msk):
     b := int(H_blind(msk)) mod n; fail if b = 0
     B := b*G
-    (ek, dk) := ML-KEM-768.KeyGen_internal(H_kem-d(msk), H_kem-z(msk))
+    (ek, dk) := KEM.KeyGen_internal(H_kem-d(msk), H_kem-z(msk))
     Return (b, dk, B, ek)
 
 KeyGen():
@@ -134,8 +131,9 @@ A recipient first calls <code>KeyGen</code> to generate a key pair:
 
 <code>KeyGen</code> draws <code>msk</code> uniformly at random to keep the description self-contained.
 In practice, wallets derive <code>msk</code> deterministically under the key derivation rules of the application, so that a wallet restored from its backup recomputes <code>msk</code> and recovers its outputs.
-This document does not fix that derivation: any derivation is acceptable if <code>msk</code> is indistinguishable from a uniformly random 32-byte string to anyone who does not hold the wallet's secret, and the [[#security|Security]] argument is then unchanged.
-For example, Liquid wallets derive a blinding key per scriptPubKey from a master blinding key ([https://github.com/satoshilabs/slips/blob/master/slip-0077.md SLIP-77]), and watch-only wallets obtain the same derivation from CT descriptors ([https://github.com/ElementsProject/ELIPs/blob/main/elip-0150.mediawiki ELIP 150]).
+This document does not fix that derivation, but the derivation MUST be a pseudorandom function, such as HMAC-SHA256, keyed with a secret that is used for nothing else and that an adversary with a CRQC cannot compute, and <code>msk</code> MUST NOT be used outside HKE; the [[#security|Security]] argument then holds unchanged.
+For example, a Liquid wallet with the master blinding key <code>mbk</code> of [https://github.com/satoshilabs/slips/blob/master/slip-0077.md SLIP-77] can set <code>msk := HMAC-SHA256(H_t(mbk), scriptPubKey)</code> for a tag <code>t</code> of its own.
+Keying HMAC with <code>mbk</code> itself would not do: that gives the SLIP-77 blinding key of the scriptPubKey, whose public key appears in the wallet's confidential addresses.
 
 ===Encapsulation===
 
@@ -181,23 +179,46 @@ Output: decryption key <code>K</code>.
     Return K.</pre>
 
 Apart from the two format checks above, <code>Decaps</code> does not fail.
-<code>ML-KEM.Decaps</code> uses implicit rejection: if <code>c</code> was not produced for <code>ek</code>, it returns an unrelated pseudorandom <code>K_q</code>, so the resulting <code>K</code> is simply wrong.
+<code>KEM.Decaps</code> uses implicit rejection: if <code>c</code> was not produced for <code>ek</code>, it returns an unrelated pseudorandom <code>K_q</code>, so the resulting <code>K</code> is simply wrong.
 The recipient finds out only when the application tries to use <code>K</code> — in [[#confidential-assets|Confidential Assets]], the range-proof rewind fails.
 Applications MUST treat this as &quot;output not recovered&quot;, not as a protocol error.
 
 <span id="security"></span>
 ==Security==
 
-HKE instantiates the QSF combiner of [https://eprint.iacr.org/2024/039 X-Wing] with <code>secp256k1</code> and tagged SHA-256, and its security follows from the X-Wing proof.
-<code>K</code> is indistinguishable from random if either of the following holds:
+HKE instantiates the QSF combiner of [https://eprint.iacr.org/2024/039 X-Wing] with <code>secp256k1</code> and tagged SHA-256.
+Informally, with the tagged hashes modeled as random oracles, <code>K</code> is indistinguishable from random if either of the following holds:
 
-# '''<code>ML-KEM-768</code> is IND-CCA secure and <code>H_seed</code> keyed by <code>K_q</code> is a PRF.''' This condition holds against quantum adversaries.
-# '''<code>H_seed</code> is modeled as a random oracle and Diffie–Hellman on <code>secp256k1</code> is hard.''' This protects <code>K</code> if ML-KEM-768 is broken but no CRQC exists: computing <code>K_c</code> from <code>B</code> and <code>E</code> is CDH on <code>secp256k1</code> (strong Diffie–Hellman once the adversary can query decapsulation, as in X-Wing).
+# '''<code>ML-KEM-768</code> is IND-CCA secure.''' This covers quantum adversaries, with quantum access to the random oracles.
+# '''The strong Diffie–Hellman problem on <code>secp256k1</code> is hard.''' This protects <code>K</code> against classical adversaries if <code>ML-KEM-768</code> is broken: computing <code>K_c</code> requires <code>e*B</code> from <code>B</code> and <code>E</code>, and, as in X-Wing, the proof answers decapsulation queries with a strong Diffie–Hellman oracle.
 
-HKE additionally hashes <code>c</code> and <code>ek</code>.
-They are public and fixed-length, so they do not change either security condition; they only bind <code>K</code> to the PQ ciphertext and key.
+HKE additionally hashes <code>c</code> and <code>ek</code>, which X-Wing omits.
+Because <code>c</code> is hashed, condition 1 needs only that <code>ML-KEM-768</code> is IND-CCA secure; X-Wing omits <code>c</code> and therefore relies on further properties of <code>ML-KEM-768</code>.
 
 HKE does not provide forward secrecy (compromise of <code>msk</code> exposes every <code>K</code> sent to it), sender authentication, deniability, or an explicit failure signal (see [[#decapsulation|Decapsulation]]).
+
+<span id="rationale"></span>
+==Rationale==
+
+HKE is designed for Bitcoin-based chains, such as Bitcoin and Liquid, and for protocols that use the same primitives, such as Nostr.
+These use <code>secp256k1</code> for keys and SHA-256 for hashing, so HKE keeps both and adds only what they lack, a post-quantum KEM.
+
+===secp256k1 and SHA-256===
+
+With <code>secp256k1</code>, the classical part of HKE is the ECDH these protocols already perform, with the same point encodings and the same implementations, such as [https://github.com/bitcoin-core/secp256k1 <code>libsecp256k1</code>] and [https://github.com/BlockstreamResearch/secp256k1-zkp <code>secp256k1-zkp</code>].
+A wallet that adopts HKE needs no second curve.
+Every hash in HKE is a tagged hash, the domain-separated SHA-256 that BIP340 defines, [https://github.com/bitcoin/bips/blob/master/bip-0341.mediawiki BIP341] and [https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki BIP352] use, and <code>libsecp256k1</code> implements.
+
+===ML-KEM-768===
+
+The encapsulation key <code>ek</code> is part of the recipient's public key, and a ciphertext <code>c</code> is published with every encapsulation, so their sizes are the main criterion for choosing the KEM.
+<code>ML-KEM</code> ([https://csrc.nist.gov/pubs/fips/203/final FIPS 203]) has smaller keys and ciphertexts than [https://pqc-hqc.org/doc/hqc_specifications_2025_08_22.pdf HQC], the only other KEM [https://csrc.nist.gov/pubs/ir/8545/final NIST has selected], which at category 3 has a 4514-byte <code>ek</code> and an 8978-byte <code>c</code>.
+[https://eprint.iacr.org/2018/383 CSIDH], the main alternative outside NIST's selection, needs public values of about 1 KB at category 3 ([https://eprint.iacr.org/2020/1520 SQALE]), close to the 1184-byte <code>ek</code> and 1088-byte <code>c</code> of <code>ML-KEM-768</code>, and its group action is orders of magnitude slower.
+
+HKE uses <code>ML-KEM-768</code> (category 3), which FIPS 203 (§8) recommends as the default parameter set because it &quot;provides a large security margin at a reasonable performance cost&quot;.
+X-Wing, which targets category 1, also uses <code>ML-KEM-768</code> rather than <code>ML-KEM-512</code>, as a hedge against future cryptanalysis ([https://datatracker.ietf.org/doc/draft-connolly-cfrg-xwing-kem/ X-Wing draft]).
+The margin matters for HKE because a ciphertext, once published, stays exposed to any later attack ([[#motivation|Motivation]]).
+<code>ML-KEM-1024</code> (category 5) would add 384 bytes to <code>ek</code> and 480 bytes to every <code>c</code>.
 
 ==Applications==
 

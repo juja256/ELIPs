@@ -135,7 +135,6 @@ class KEM:
         return True
 
 
-ML_KEM_768 = KEM
 L_ek = KEM.L_ek
 L_c = KEM.L_c
 
@@ -148,7 +147,7 @@ def expandDecapsulationKey(msk: bytes):
     if b == 0:
         raise HKEFailure("b = 0")
     B = b * G
-    (ek, dk) = ML_KEM_768.KeyGen_internal(H_kem_d(msk), H_kem_z(msk))
+    (ek, dk) = KEM.KeyGen_internal(H_kem_d(msk), H_kem_z(msk))
     return (b, dk, B, ek)
 
 
