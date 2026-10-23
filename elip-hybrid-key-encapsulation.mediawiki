@@ -43,6 +43,8 @@ One proposed remedy is a ''hybrid key encapsulation'': a secret is combined from
 
 If one of the two parts is compromised, the scheme remains secure, e.g. if advances in cryptanalysis of lattice-based constructions compromise ML-KEM, classical security will still be guaranteed by ECDH.
 For this reason, messaging protocols facing the same exposure are actively moving to hybrid key encapsulation (e.g. Signal's [https://signal.org/docs/specifications/pqxdh/ PQXDH] and Apple's [https://security.apple.com/blog/imessage-pq3/ iMessage PQ3]).
+Another example is Bitcoin's encrypted peer-to-peer transport protocol [https://github.com/bitcoin/bips/blob/master/bip-0324.mediawiki BIP324], which uses <code>secp256k1</code> ECDH.
+Developers are actively discussing the hybrid replacement on the [https://groups.google.com/g/bitcoindev/c/n_5WuKVYqwI bitcoindev mailing list].
 
 One possible important application of HKE is the [https://blockstream.com/bitcoin17-final41.pdf Confidential Assets] protocol, currently deployed on the Liquid network: sender and recipient establish a shared secret via ECDH and use it to derive a seed for a witness-recoverable range proof, letting the recipient later recover the amount and blinders under that same secret.
 Because every range proof is published on-chain, an attacker equipped with a CRQC can retroactively break the ''confidentiality'' of every such output ever created.
@@ -148,6 +150,7 @@ Output: encryption key <code>K</code> and ciphertext <code>(E_bytes, c)</code>.
 EncapsDerand(B_bytes, ek, e, m):
     B := lift(B_bytes); fail if lift fails.
     Fail if not KEM.CheckEK(ek).
+    Fail if not 1 <= e <= n-1.
     E := e*G
     E_bytes := cbytes(E)
     K_c := H_ecdh(cbytes(e*B))
@@ -270,12 +273,14 @@ HKE is a new primitive and changes no existing protocol.
 
 A Python reference implementation of the Specification section is in [[elip-hybrid-key-encapsulation/hke.py|<code>elip-hybrid-key-encapsulation/hke.py</code>]], with one function per pseudocode definition.
 It uses a vendored copy of the [https://github.com/secp256k1lab/secp256k1lab/ secp256k1lab] library at version 1.0.0 (commit [https://github.com/secp256k1lab/secp256k1lab/commit/44dc4bd893b8f03e621585e3bf255253e0e0fbfb 44dc4bd893b8f03e621585e3bf255253e0e0fbfb]), and [https://github.com/GiacomoPope/kyber-py <code>kyber-py</code>] 1.2.0 for ML-KEM-768, which passes NIST's ACVP test vectors for FIPS 203.
-Test vectors are in [[elip-hybrid-key-encapsulation/vectors.json|<code>elip-hybrid-key-encapsulation/vectors.json</code>]] and are produced by <code>gen_vectors.py</code> in the same directory.
+Test vectors are in [[elip-hybrid-key-encapsulation/vectors.json|<code>elip-hybrid-key-encapsulation/vectors.json</code>]] and are produced by [[elip-hybrid-key-encapsulation/gen_vectors.py|<code>elip-hybrid-key-encapsulation/gen_vectors.py</code>]] in the same directory.
+Each vector lists its inputs under <code>given</code> and the values an implementation must compute under <code>expected</code>; failure vectors have no <code>expected</code>.
 They cover:
 
 * '''Valid:''' <code>msk</code>, <code>e</code> and <code>m</code> as inputs; <code>b</code>, <code>B</code>, <code>ek</code>, <code>dk</code>, <code>E_bytes</code>, <code>c</code>, <code>K_c</code>, <code>K_q</code> and <code>K</code> as outputs.
-* '''Implicit rejection:''' ciphertexts that decapsulate without error to a <code>K</code> different from the encapsulated one, with that <code>K</code> given.
-* '''Decapsulation failure:''' an invalid <code>E_bytes</code> (including <code>X >= p</code> where <code>X - p</code> is a valid x coordinate, which catches an implementation that reduces <code>X</code> modulo <code>p</code>) or a wrong <code>|c|</code>.
-* '''Encapsulation failure:''' an invalid <code>B_bytes</code> (the same classes as <code>E_bytes</code>) or an <code>ek</code> that fails <code>KEM.CheckEK</code>.
+* '''Valid encapsulation:''' <code>B_bytes</code>, <code>ek</code>, <code>e</code> and <code>m</code> as inputs; <code>E_bytes</code>, <code>c</code>, <code>K_c</code>, <code>K_q</code> and <code>K</code> as outputs, for an <code>ek</code> that <code>KeyGen</code> does not produce but <code>KEM.CheckEK</code> accepts: each 3-byte group packs <code>q - 1</code> next to <code>q - 2</code>, so that a decoder that reads a bit from the wrong place sees a coefficient <code>>= q</code>, and the last 32 bytes are <code>0xff</code>.
+* '''Implicit rejection:''' ciphertexts that decapsulate without error to a <code>K</code> different from the encapsulated one, with that <code>K</code> and its <code>K_c</code> and <code>K_q</code> given.
+* '''Decapsulation failure:''' an invalid <code>E_bytes</code> or a wrong <code>|c|</code>. The invalid <code>E_bytes</code> include the 65-byte uncompressed and hybrid encodings, which a general SEC1 parser such as <code>secp256k1_ec_pubkey_parse</code> accepts, and <code>X >= p</code> where <code>X - p</code> is a valid x coordinate, which catches an implementation that reduces <code>X</code> modulo <code>p</code>.
+* '''Encapsulation failure:''' an invalid <code>B_bytes</code> (the same classes as <code>E_bytes</code>), an <code>ek</code> that fails <code>KEM.CheckEK</code> (a wrong <code>|ek|</code>, or a coefficient <code>>= q</code> at the first and last position of each of the three polynomials, which covers both 12-bit halves of a 3-byte group), or an <code>e</code> outside <code>[1, n-1]</code> (including <code>n + 1</code>, which catches an implementation that reduces <code>e</code> modulo <code>n</code>).
 
-The production implementation targets [https://github.com/BlockstreamResearch/secp256k1-zkp <code>secp256k1-zkp</code>]: the KEM interface, the combiner, and the wiring of <code>K</code> into the existing range-proof seed path, with round-trip recovery validated on the recipient side.
+No vector reaches the reduction modulo <code>n</code> or the <code>b = 0</code> failure in <code>expandDecapsulationKey</code>: both need <code>int(H_blind(msk)) >= n</code>, which happens with probability about <code>2^-128</code>.

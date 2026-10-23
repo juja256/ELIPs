@@ -1,7 +1,7 @@
 """ML-KEM-768 backend against NIST's ACVP test vectors for FIPS 203.
 
 Covers every ML-KEM function HKE calls: `KeyGen_internal(d, z)`,
-`Encaps_internal(ek, m)`, `Decaps(c, dk)` (including modified ciphertexts,
+`Encaps_internal(ek, m)`, `Decaps(dk, c)` (including modified ciphertexts,
 i.e. implicit rejection) and `CheckEK(ek)`.
 """
 

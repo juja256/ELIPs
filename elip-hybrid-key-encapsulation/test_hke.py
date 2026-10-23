@@ -1,10 +1,18 @@
+"""Unit tests for `hke.py` on fresh random keys.
+
+`test_vectors.py` pins exact outputs; these tests check properties instead:
+that a round trip recovers `K`, that every invalid input is rejected, and that
+a modified ciphertext gives a wrong `K` rather than an error.
+"""
+
 import hashlib
 
 import pytest
 
 from kyber_py.ml_kem import ML_KEM_768 as kyber
 
-from gen_vectors import set_coefficient
+import hke
+from gen_vectors import flip, invalid_encodings, set_coefficient
 from hke import (
     H,
     KEM,
@@ -13,6 +21,7 @@ from hke import (
     HKEFailure,
     Decaps,
     Encaps,
+    EncapsDerand,
     G,
     KeyGen,
     cbytes,
@@ -27,25 +36,25 @@ p = FE.SIZE
 
 @pytest.fixture(scope="module")
 def recipient():
+    """A random recipient: `(msk, B_bytes, ek)`."""
     msk, (B, ek) = KeyGen()
     return msk, B, ek
 
 
 @pytest.fixture(scope="module")
 def encapsulation(recipient):
+    """One encapsulation to `recipient`: `(K, (E_bytes, c))`."""
     _, B, ek = recipient
     return Encaps(B, ek)
 
 
-def flip(data: bytes, i: int) -> bytes:
-    return data[:i] + bytes([data[i] ^ 1]) + data[i + 1 :]
+def resized(data: bytes, length: int) -> bytes:
+    """`data` cut or zero-padded to `length` bytes."""
+    return data[:length].ljust(length, b"\x00")
 
 
-def _x_not_on_curve() -> bytes:
-    X = 0
-    while lift(b"\x02" + X.to_bytes(32, "big")) is not None:
-        X += 1
-    return b"\x02" + X.to_bytes(32, "big")
+# Every kind of byte string that `lift` must reject, used for both B_bytes and E_bytes.
+INVALID_POINTS = [pytest.param(bad, id=what) for what, bad in invalid_encodings(cbytes(G))]
 
 
 # --- secp256k1 and tagged hash ----------------------------------------------
@@ -67,13 +76,13 @@ def test_lift_inverts_cbytes():
 
 
 def test_lift_rejects_noncanonical_x():
-    # X = p + 1 reduces to x = 1, a valid x coordinate; lift must not reduce.
+    """x = p + 1 would reduce to the valid x = 1, so lift must reject it rather than reduce it."""
     assert lift(b"\x02" + (1).to_bytes(32, "big")) is not None
     assert lift(b"\x02" + (p + 1).to_bytes(32, "big")) is None
 
 
 def test_lift_rejects_uncompressed_and_hybrid_encodings():
-    # lift accepts only the 33-byte compressed form.
+    """lift accepts only the 33-byte compressed form, whatever the 65-byte prefix."""
     uncompressed = G.to_bytes_uncompressed()
     assert len(uncompressed) == 65
     for prefix in (4, 6, 7):
@@ -108,13 +117,49 @@ def test_keygen_is_deterministic_from_msk(recipient):
 
 
 def test_sizes(recipient, encapsulation):
-    _, _, ek = recipient
+    msk, _, ek = recipient
     K, (E_bytes, c) = encapsulation
+    assert len(msk) == 32
     assert len(ek) == L_ek
     assert len(c) == L_c
     assert len(E_bytes) == 33
     assert lift(E_bytes) is not None
     assert len(K) == 32
+
+
+def test_blinding_scalar_is_reduced_mod_n(monkeypatch):
+    """b is H_blind(msk) reduced modulo n. No real msk reaches this: it needs H_blind(msk) >= n."""
+    monkeypatch.setattr(hke, "H_blind", lambda msk: (n + 5).to_bytes(32, "big"))
+    (b, _, B, _) = expandDecapsulationKey(bytes(32))
+    assert b == 5
+    assert B == 5 * G
+
+
+def test_blinding_scalar_zero_fails(monkeypatch):
+    """KeyGen fails if b = 0. No real msk reaches this: it needs H_blind(msk) = n."""
+    monkeypatch.setattr(hke, "H_blind", lambda msk: n.to_bytes(32, "big"))
+    with pytest.raises(HKEFailure):
+        expandDecapsulationKey(bytes(32))
+
+
+@pytest.mark.parametrize("draw", [pytest.param(0, id="smallest draw"), pytest.param(n - 2, id="largest draw")])
+def test_encaps_is_encaps_derand_with_fresh_randomness(recipient, monkeypatch, draw):
+    """Encaps draws e as 1 + randbelow(n - 1), which covers exactly [1, n-1], then 32 bytes of m."""
+    _, B, ek = recipient
+    requests = []
+
+    def randbelow(bound):
+        requests.append(("randbelow", bound))
+        return draw
+
+    def token_bytes(length):
+        requests.append(("token_bytes", length))
+        return bytes(length)
+
+    monkeypatch.setattr(hke.secrets, "randbelow", randbelow)
+    monkeypatch.setattr(hke.secrets, "token_bytes", token_bytes)
+    assert Encaps(B, ek) == EncapsDerand(B, ek, draw + 1, bytes(32))
+    assert requests == [("randbelow", n - 1), ("token_bytes", 32)]
 
 
 def test_roundtrip(recipient, encapsulation):
@@ -137,30 +182,41 @@ def test_encaps_is_randomized(recipient):
     assert K1 != K2 and E1 != E2 and c1 != c2
 
 
-@pytest.mark.parametrize(
-    "B_bytes",
-    [
-        b"",
-        b"\x00",  # SEC1 encoding of O
-        b"\x04" + bytes(32),  # bad prefix
-        G.to_bytes_uncompressed(),
-        b"\x02" + bytes(31),  # too short
-        b"\x02" + bytes(33),  # too long
-        b"\x02" + (p + 1).to_bytes(32, "big"),  # X >= p, X - p a valid x
-        _x_not_on_curve(),
-    ],
-    ids=["empty", "infinity", "bad-prefix", "uncompressed", "short", "long", "x-ge-p", "off-curve"],
-)
+@pytest.mark.parametrize("B_bytes", INVALID_POINTS)
 def test_encaps_rejects_invalid_B(recipient, B_bytes):
     _, _, ek = recipient
     with pytest.raises(HKEFailure):
         Encaps(B_bytes, ek)
 
 
+@pytest.mark.parametrize(
+    "e",
+    [
+        pytest.param(0, id="0"),
+        pytest.param(n, id="n"),
+        pytest.param(n + 1, id="n + 1"),
+        pytest.param(2**256 - 1, id="2^256 - 1"),
+    ],
+)
+def test_encaps_derand_rejects_e_out_of_range(recipient, e):
+    """EncapsDerand rejects e outside [1, n-1]; reducing instead would turn e = n + 1 into e = 1."""
+    _, B, ek = recipient
+    with pytest.raises(HKEFailure):
+        EncapsDerand(B, ek, e, bytes(32))
+
+
+@pytest.mark.parametrize("e", [pytest.param(1, id="1"), pytest.param(n - 1, id="n - 1")])
+def test_encaps_derand_accepts_e_at_bounds(recipient, e):
+    msk, B, ek = recipient
+    K, ct = EncapsDerand(B, ek, e, bytes(32))
+    assert Decaps(ct, msk) == K
+
+
 # --- Encapsulation key check (FIPS 203, 7.2) --------------------------------
 
 
 def kyber_accepts(ek: bytes) -> bool:
+    """Whether kyber-py's own encapsulation accepts `ek`, as an independent check of CheckEK."""
     try:
         kyber.encaps(ek)
         return True
@@ -173,20 +229,40 @@ def test_check_ek_accepts_valid_key(recipient):
     assert KEM.CheckEK(ek)
 
 
-@pytest.mark.parametrize("i", [0, 1, 767])
-@pytest.mark.parametrize("value", [KEM.q - 1, KEM.q, 4095])
+# Both halves of the first 3-byte group, and the first and last coefficient of each polynomial.
+@pytest.mark.parametrize("i", [0, 1, 255, 256, 511, 512, 767], ids="coefficient {}".format)
+@pytest.mark.parametrize(
+    "value",
+    [pytest.param(KEM.q - 1, id="q - 1"), pytest.param(KEM.q, id="q"), pytest.param(4095, id="4095")],
+)
 def test_check_ek_modulus_check(recipient, i, value):
+    """CheckEK accepts a coefficient below q and rejects one at or above it, as kyber-py does."""
     _, _, ek = recipient
-    bad = set_coefficient(ek, i, value)
-    assert KEM.CheckEK(bad) == (value < KEM.q)
-    assert KEM.CheckEK(bad) == kyber_accepts(bad)
+    modified = set_coefficient(ek, i, value)
+    assert KEM.CheckEK(modified) == (value < KEM.q)
+    assert KEM.CheckEK(modified) == kyber_accepts(modified)
 
 
-@pytest.mark.parametrize("length", [0, L_ek - 1, L_ek + 1])
+def test_check_ek_ignores_rho(recipient):
+    """The last 32 bytes of ek are the seed rho, not coefficients, so any value is accepted."""
+    _, _, ek = recipient
+    rho_ff = ek[:-32] + b"\xff" * 32
+    assert KEM.CheckEK(rho_ff)
+    assert kyber_accepts(rho_ff)
+
+
+@pytest.mark.parametrize(
+    "length",
+    [
+        pytest.param(0, id="empty"),
+        pytest.param(L_ek - 1, id="one byte short"),
+        pytest.param(L_ek + 1, id="one byte too long"),
+    ],
+)
 def test_encaps_rejects_wrong_length_ek(recipient, length):
     _, B, ek = recipient
     with pytest.raises(HKEFailure):
-        Encaps(B, (ek * 2)[:length])
+        Encaps(B, resized(ek, length))
 
 
 def test_encaps_rejects_ek_failing_modulus_check(recipient):
@@ -195,10 +271,12 @@ def test_encaps_rejects_ek_failing_modulus_check(recipient):
         Encaps(B, set_coefficient(ek, 5, KEM.q))
 
 
-# --- Invalid ciphertexts: implicit rejection (wrong K, no error) -------------
+# --- Invalid ciphertexts: implicit rejection --------------------------------
+# Decaps cannot tell that these ciphertexts were modified: it returns a K
+# without error, but not the K that the sender derived.
 
 
-@pytest.mark.parametrize("i", [0, 1, L_c // 2, L_c - 1])
+@pytest.mark.parametrize("i", [0, 1, L_c // 2, L_c - 1], ids="byte {}".format)
 def test_tampered_c_gives_wrong_key(recipient, encapsulation, i):
     msk, _, _ = recipient
     K, (E_bytes, c) = encapsulation
@@ -210,8 +288,8 @@ def test_tampered_c_gives_wrong_key(recipient, encapsulation, i):
 def test_implicit_rejection_is_deterministic(recipient, encapsulation):
     msk, _, _ = recipient
     _, (E_bytes, c) = encapsulation
-    bad = (E_bytes, flip(c, 7))
-    assert Decaps(bad, msk) == Decaps(bad, msk)
+    tampered = (E_bytes, flip(c, 7))
+    assert Decaps(tampered, msk) == Decaps(tampered, msk)
 
 
 def test_different_valid_E_gives_wrong_key(recipient, encapsulation):
@@ -228,6 +306,7 @@ def test_ciphertext_for_other_recipient_gives_wrong_key(encapsulation):
 
 
 def test_ciphertexts_cannot_be_mixed(recipient):
+    """E from one encapsulation and c from another give neither encapsulation's K."""
     msk, B, ek = recipient
     K1, (E1, c1) = Encaps(B, ek)
     K2, (E2, c2) = Encaps(B, ek)
@@ -235,31 +314,26 @@ def test_ciphertexts_cannot_be_mixed(recipient):
     assert K_mixed not in (K1, K2)
 
 
-# --- Invalid ciphertexts: explicit failure (format checks) -------------------
-
-
-@pytest.mark.parametrize("length", [0, L_c - 1, L_c + 1])
-def test_wrong_length_c_fails(recipient, encapsulation, length):
-    msk, _, _ = recipient
-    _, (E_bytes, c) = encapsulation
-    bad_c = (c * 2)[:length]
-    with pytest.raises(HKEFailure):
-        Decaps((E_bytes, bad_c), msk)
+# --- Invalid ciphertexts: explicit failure ----------------------------------
+# Decaps fails only on these two format checks.
 
 
 @pytest.mark.parametrize(
-    "E_bytes",
+    "length",
     [
-        b"",
-        b"\x00",  # SEC1 encoding of O
-        b"\x04" + bytes(32),  # bad prefix
-        b"\x02" + bytes(31),  # too short
-        b"\x02" + bytes(33),  # too long
-        b"\x02" + (p + 1).to_bytes(32, "big"),  # X >= p, X - p a valid x
-        _x_not_on_curve(),
+        pytest.param(0, id="empty"),
+        pytest.param(L_c - 1, id="one byte short"),
+        pytest.param(L_c + 1, id="one byte too long"),
     ],
-    ids=["empty", "infinity", "bad-prefix", "short", "long", "x-ge-p", "off-curve"],
 )
+def test_wrong_length_c_fails(recipient, encapsulation, length):
+    msk, _, _ = recipient
+    _, (E_bytes, c) = encapsulation
+    with pytest.raises(HKEFailure):
+        Decaps((E_bytes, resized(c, length)), msk)
+
+
+@pytest.mark.parametrize("E_bytes", INVALID_POINTS)
 def test_invalid_E_fails(recipient, encapsulation, E_bytes):
     msk, _, _ = recipient
     _, (_, c) = encapsulation

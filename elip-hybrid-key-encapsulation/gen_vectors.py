@@ -61,38 +61,75 @@ def set_coefficient(ek: bytes, i: int, value: int) -> bytes:
     return bytes(ek)
 
 
+def ek_from_coefficients(coefficients: list[int], rho: bytes) -> bytes:
+    """An `ek` with the given 768 coefficients, followed by `rho`."""
+    ek = bytes(KEM.L_ek - 32) + rho
+    for i, value in enumerate(coefficients):
+        ek = set_coefficient(ek, i, value)
+    return ek
+
+
+def hybrid(P) -> bytes:
+    """The 65-byte SEC1 hybrid encoding of `P`: prefix 0x06 or 0x07 by the parity of Y."""
+    return bytes([6 + (int(P.y) & 1)]) + P.to_bytes_uncompressed()[1:]
+
+
 def valid_vector(comment: str, msk: bytes, e: int, m: bytes) -> dict:
     (b, dk, B, ek) = expandDecapsulationKey(msk)
     K, (E_bytes, c) = EncapsDerand(cbytes(B), ek, e, m)
     assert Decaps((E_bytes, c), msk) == K
     return {
         "comment": comment,
-        "msk": h(msk),
-        "e": h32(e),
-        "m": h(m),
-        "b": h32(b),
-        "B": h(cbytes(B)),
-        "ek": h(ek),
-        "dk": h(dk),
-        "E_bytes": h(E_bytes),
-        "c": h(c),
-        "K_c": h(H_ecdh(cbytes(b * lift(E_bytes)))),
-        "K_q": h(KEM.Decaps(dk, c)),
-        "K": h(K),
+        "given": {"msk": h(msk), "e": h32(e), "m": h(m)},
+        "expected": {
+            "b": h32(b),
+            "B": h(cbytes(B)),
+            "ek": h(ek),
+            "dk": h(dk),
+            "E_bytes": h(E_bytes),
+            "c": h(c),
+            "K_c": h(H_ecdh(cbytes(b * lift(E_bytes)))),
+            "K_q": h(KEM.Decaps(dk, c)),
+            "K": h(K),
+        },
+    }
+
+
+def encaps_valid_vector(comment: str, B: bytes, ek: bytes, e: int, m: bytes) -> dict:
+    K, (E_bytes, c) = EncapsDerand(B, ek, e, m)
+    return {
+        "comment": comment,
+        "given": {"B": h(B), "ek": h(ek), "e": h32(e), "m": h(m)},
+        "expected": {
+            "E_bytes": h(E_bytes),
+            "c": h(c),
+            "K_c": h(H_ecdh(cbytes(e * lift(B)))),
+            "K_q": h(KEM.Encaps_internal(ek, m)[0]),
+            "K": h(K),
+        },
     }
 
 
 def rejection_vector(comment: str, msk: bytes, E_bytes: bytes, c: bytes, K_honest: str) -> dict:
+    (b, dk, _, _) = expandDecapsulationKey(msk)
     K = Decaps((E_bytes, c), msk)
     assert h(K) != K_honest
-    return {"comment": comment, "msk": h(msk), "E_bytes": h(E_bytes), "c": h(c), "K": h(K)}
+    return {
+        "comment": comment,
+        "given": {"msk": h(msk), "E_bytes": h(E_bytes), "c": h(c)},
+        "expected": {
+            "K_c": h(H_ecdh(cbytes(b * lift(E_bytes)))),
+            "K_q": h(KEM.Decaps(dk, c)),
+            "K": h(K),
+        },
+    }
 
 
 def decaps_failure_vector(comment: str, msk: bytes, E_bytes: bytes, c: bytes) -> dict:
     try:
         Decaps((E_bytes, c), msk)
     except HKEFailure:
-        return {"comment": comment, "msk": h(msk), "E_bytes": h(E_bytes), "c": h(c)}
+        return {"comment": comment, "given": {"msk": h(msk), "E_bytes": h(E_bytes), "c": h(c)}}
     raise AssertionError(f"Decaps did not fail: {comment}")
 
 
@@ -100,7 +137,7 @@ def encaps_failure_vector(comment: str, B: bytes, ek: bytes, e: int, m: bytes) -
     try:
         EncapsDerand(B, ek, e, m)
     except HKEFailure:
-        return {"comment": comment, "B": h(B), "ek": h(ek), "e": h32(e), "m": h(m)}
+        return {"comment": comment, "given": {"B": h(B), "ek": h(ek), "e": h32(e), "m": h(m)}}
     raise AssertionError(f"EncapsDerand did not fail: {comment}")
 
 
@@ -120,60 +157,106 @@ def x_ge_p() -> bytes:
     return b"\x02" + X.to_bytes(32, "big")
 
 
+def invalid_encodings(P_bytes: bytes) -> list[tuple[str, bytes]]:
+    """Byte strings that `lift` must reject, each made from the valid encoding `P_bytes`."""
+    P = lift(P_bytes)
+    return [
+        ("empty", b""),
+        ("point at infinity (0x00)", b"\x00"),
+        ("prefix 0x04", b"\x04" + P_bytes[1:]),
+        ("uncompressed (65 bytes)", P.to_bytes_uncompressed()),
+        ("hybrid (65 bytes)", hybrid(P)),
+        ("32 bytes", P_bytes[:32]),
+        ("34 bytes", P_bytes + b"\x00"),
+        ("x = p + 1, which must not be reduced to the valid x = 1", x_ge_p()),
+        ("x not on the curve", x_not_on_curve()),
+    ]
+
+
 def generate() -> dict:
     msk = [label(f"msk/{i}") for i in range(3)]
+
+    # KeyGen, EncapsDerand and Decaps end to end.
     valid = [
-        valid_vector("generic", msk[0], scalar("e/0"), label("m/0")),
-        valid_vector("generic, second recipient", msk[1], scalar("e/1"), label("m/1")),
-        valid_vector("e = 1, so E = G", msk[2], 1, label("m/2")),
-        valid_vector("e = n - 1, so E = -G", msk[2], n - 1, label("m/3")),
-        valid_vector("m = 0^32", msk[0], scalar("e/4"), bytes(32)),
+        valid_vector("pseudorandom inputs", msk[0], scalar("e/0"), label("m/0")),
+        valid_vector("pseudorandom inputs, another recipient", msk[1], scalar("e/1"), label("m/1")),
+        valid_vector("smallest e: e = 1, so E = G", msk[2], 1, label("m/2")),
+        valid_vector("largest e: e = n - 1, so E = -G", msk[2], n - 1, label("m/3")),
+        valid_vector("all-zero m", msk[0], scalar("e/4"), bytes(32)),
     ]
 
-    v0, v1 = valid[0], valid[1]
-    E0, c0, K0 = bytes.fromhex(v0["E_bytes"]), bytes.fromhex(v0["c"]), v0["K"]
-    E1, c1 = bytes.fromhex(v1["E_bytes"]), bytes.fromhex(v1["c"])
-    implicit_rejection = [
-        rejection_vector("valid vector 0, first bit of c flipped", msk[0], E0, flip(c0, 0), K0),
-        rejection_vector("valid vector 0, last byte of c flipped", msk[0], E0, flip(c0, KEM.L_c - 1), K0),
-        rejection_vector("valid vector 0 with E replaced by 3*G", msk[0], cbytes(3 * G), c0, K0),
-        rejection_vector("valid vector 0 with E from valid vector 1", msk[0], E1, c0, K0),
-        rejection_vector("valid vector 1 decapsulated by recipient 0", msk[0], E1, c1, K0),
+    # The other groups change the first valid vector, so read back its values.
+    given0, expected0, expected1 = valid[0]["given"], valid[0]["expected"], valid[1]["expected"]
+    e0, m0 = int(given0["e"], 16), bytes.fromhex(given0["m"])
+    B0, ek0 = bytes.fromhex(expected0["B"]), bytes.fromhex(expected0["ek"])
+    E0, c0, K0 = bytes.fromhex(expected0["E_bytes"]), bytes.fromhex(expected0["c"]), expected0["K"]
+    E1, c1 = bytes.fromhex(expected1["E_bytes"]), bytes.fromhex(expected1["c"])
+
+    # EncapsDerand alone, on an ek that KeyGen does not produce. Each 3-byte group packs
+    # q - 1 = 0xd00 next to q - 2 = 0xcff, in both orders, so every bit that a misdecoded
+    # q - 1 could pick up from its neighbour is one, and pushes it to q or more.
+    q = KEM.q
+    encaps_valid = [
+        encaps_valid_vector(
+            "largest valid ek: each 3-byte group packs q - 1 next to q - 2, rho is all 0xff",
+            B0, ek_from_coefficients([q - 1, q - 2, q - 2, q - 1] * 192, b"\xff" * 32), e0, m0,
+        ),
     ]
+
+    # Decaps succeeds but returns a K unrelated to the sender's.
+    def rejected(comment, E_bytes=E0, c=c0):
+        return rejection_vector(comment, msk[0], E_bytes, c, K0)
+
+    implicit_rejection = [
+        rejected("first valid vector with the first bit of c flipped", c=flip(c0, 0)),
+        rejected("first valid vector with a bit in the last byte of c flipped", c=flip(c0, KEM.L_c - 1)),
+        rejected("first valid vector with E replaced by another valid point, 3*G", E_bytes=cbytes(3 * G)),
+        rejected("first valid vector with E taken from the second valid vector", E_bytes=E1),
+        rejected("second valid vector decapsulated by the first recipient", E_bytes=E1, c=c1),
+    ]
+
+    # Decaps must fail.
+    def decaps_fails(comment, E_bytes=E0, c=c0):
+        return decaps_failure_vector(comment, msk[0], E_bytes, c)
 
     decaps_failure = [
-        decaps_failure_vector("E_bytes empty", msk[0], b"", c0),
-        decaps_failure_vector("E_bytes = 0x00 (point at infinity)", msk[0], b"\x00", c0),
-        decaps_failure_vector("E_bytes prefix 0x04", msk[0], b"\x04" + E0[1:], c0),
-        decaps_failure_vector("E_bytes 32 bytes", msk[0], E0[:32], c0),
-        decaps_failure_vector("E_bytes 34 bytes", msk[0], E0 + b"\x00", c0),
-        decaps_failure_vector("E_bytes X = p + 1 (X - p is a valid x)", msk[0], x_ge_p(), c0),
-        decaps_failure_vector("E_bytes X not on the curve", msk[0], x_not_on_curve(), c0),
-        decaps_failure_vector("|c| = L_c - 1", msk[0], E0, c0[:-1]),
-        decaps_failure_vector("|c| = L_c + 1", msk[0], E0, c0 + b"\x00"),
+        *(decaps_fails(f"E_bytes: {what}", E_bytes=bad) for what, bad in invalid_encodings(E0)),
+        decaps_fails("c: one byte short", c=c0[:-1]),
+        decaps_fails("c: one byte too long", c=c0 + b"\x00"),
     ]
 
-    B0, ek0 = bytes.fromhex(v0["B"]), bytes.fromhex(v0["ek"])
-    e0, m0 = int(v0["e"], 16), bytes.fromhex(v0["m"])
+    # EncapsDerand must fail.
+    def encaps_fails(comment, B=B0, ek=ek0, e=e0):
+        return encaps_failure_vector(comment, B, ek, e, m0)
+
+    def coefficient(i, value):
+        return set_coefficient(ek0, i, value)
+
     encaps_failure = [
-        encaps_failure_vector("ek coefficient 0 = q", B0, set_coefficient(ek0, 0, KEM.q), e0, m0),
-        encaps_failure_vector("ek coefficient 1 = 4095", B0, set_coefficient(ek0, 1, 4095), e0, m0),
-        encaps_failure_vector("|ek| = L_ek - 1", B0, ek0[:-1], e0, m0),
-        encaps_failure_vector("|ek| = L_ek + 1", B0, ek0 + b"\x00", e0, m0),
-        encaps_failure_vector("B empty", b"", ek0, e0, m0),
-        encaps_failure_vector("B = 0x00 (point at infinity)", b"\x00", ek0, e0, m0),
-        encaps_failure_vector("B prefix 0x04", b"\x04" + B0[1:], ek0, e0, m0),
-        encaps_failure_vector("B uncompressed", lift(B0).to_bytes_uncompressed(), ek0, e0, m0),
-        encaps_failure_vector("B 32 bytes", B0[:32], ek0, e0, m0),
-        encaps_failure_vector("B 34 bytes", B0 + b"\x00", ek0, e0, m0),
-        encaps_failure_vector("B X = p + 1 (X - p is a valid x)", x_ge_p(), ek0, e0, m0),
-        encaps_failure_vector("B X not on the curve", x_not_on_curve(), ek0, e0, m0),
+        encaps_fails("ek: coefficient 0 = q (first half of a 3-byte group)", ek=coefficient(0, q)),
+        encaps_fails("ek: coefficient 0 = 4095, the largest 12-bit value", ek=coefficient(0, 4095)),
+        encaps_fails("ek: coefficient 1 = q (second half of a 3-byte group)", ek=coefficient(1, q)),
+        encaps_fails("ek: coefficient 1 = 4095, the largest 12-bit value", ek=coefficient(1, 4095)),
+        encaps_fails("ek: coefficient 255 = q (last of polynomial 0)", ek=coefficient(255, q)),
+        encaps_fails("ek: coefficient 256 = q (first of polynomial 1)", ek=coefficient(256, q)),
+        encaps_fails("ek: coefficient 511 = q (last of polynomial 1)", ek=coefficient(511, q)),
+        encaps_fails("ek: coefficient 512 = q (first of polynomial 2)", ek=coefficient(512, q)),
+        encaps_fails("ek: coefficient 767 = q (last of polynomial 2)", ek=coefficient(767, q)),
+        encaps_fails("ek: one byte short", ek=ek0[:-1]),
+        encaps_fails("ek: one byte too long", ek=ek0 + b"\x00"),
+        *(encaps_fails(f"B: {what}", B=bad) for what, bad in invalid_encodings(B0)),
+        encaps_fails("e: 0", e=0),
+        encaps_fails("e: n, the group order", e=n),
+        encaps_fails("e: n + 1, which must not be reduced to e = 1", e=n + 1),
+        encaps_fails("e: 2^256 - 1, the largest 32-byte value", e=2**256 - 1),
     ]
 
     return {
-        "scheme": "ELIP-HKE/v1, ML-KEM-768",
+        "scheme": "ELIP-HKE/v1",
         "encoding": "byte strings and scalars are lowercase hex; scalars are 32-byte big-endian",
+        "layout": "each vector has the inputs in given and the values to compute in expected; *_failure vectors have no expected, the call must fail",
         "valid": valid,
+        "encaps_valid": encaps_valid,
         "implicit_rejection": implicit_rejection,
         "decaps_failure": decaps_failure,
         "encaps_failure": encaps_failure,

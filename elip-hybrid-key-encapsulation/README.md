@@ -51,22 +51,28 @@ The reference implements only the HKE layer itself; both primitives come from ca
 ## Tests
 
 - **Correctness:** round trip `Decaps(Encaps(B_bytes, ek)) = K`, deterministic `expandDecapsulationKey`, object sizes, randomized `Encaps`.
-- **Invalid public key:** every class of invalid `B_bytes` (empty, `O`, bad prefix, uncompressed, wrong length, `X >= p`, `X` not on the curve) makes `Encaps` raise `HKEFailure`.
+- **Invalid public key:** every class of invalid `B_bytes` (empty, `O`, bad prefix, uncompressed, hybrid, wrong length, `X >= p`, `X` not on the curve) makes `Encaps` raise `HKEFailure`.
 - **Primitive wiring:** generator encodings, `lift`/`cbytes` round trip, `lift` rejecting 65-byte uncompressed and hybrid encodings and a non-canonical `X = p + 1` (which reduces to a valid x coordinate), and the tagged hash equal to the BIP340 formula for every tag.
-- **Encapsulation key check:** `Encaps` rejects an `ek` of the wrong length or with a coefficient `>= q`; `CheckEK` agrees with `kyber-py` on boundary values.
+- **Encapsulation key check:** `Encaps` rejects an `ek` of the wrong length or with a coefficient `>= q`; `CheckEK` agrees with `kyber-py` on boundary values at the first and last coefficient of each polynomial, and ignores the last 32 bytes (`rho`).
+- **Ephemeral scalar:** `EncapsDerand` rejects `e` outside `[1, n-1]` (`0`, `n`, `n + 1`, `2^256 - 1`) and accepts both bounds.
+- **Randomness:** with `secrets` replaced, `Encaps` equals `EncapsDerand` with `e = 1 + randbelow(n - 1)` and a 32-byte `m`, at the smallest and largest draw; `KeyGen` returns a 32-byte `msk`.
+- **Unreachable branches:** with `H_blind` replaced, `expandDecapsulationKey` reduces `H_blind(msk)` modulo `n` and fails on `b = 0`; no real `msk` reaches either, so no vector covers them.
 - **Invalid ciphertext, implicit rejection:** a tampered `c`, a different valid `E`, a ciphertext for another recipient, or `E` and `c` taken from different encapsulations all decapsulate without error to a wrong `K`; rejection is deterministic.
-- **Invalid ciphertext, explicit failure:** wrong `|c|` and every class of invalid `E_bytes` (empty, `O`, bad prefix, wrong length, `X >= p`, `X` not on the curve) raise `HKEFailure`.
+- **Invalid ciphertext, explicit failure:** wrong `|c|` and every class of invalid `E_bytes` (empty, `O`, bad prefix, uncompressed, hybrid, wrong length, `X >= p`, `X` not on the curve) raise `HKEFailure`.
 
 ## Test vectors
 
-`vectors.json` has four groups; byte strings and scalars are lowercase hex, scalars 32-byte big-endian.
+`vectors.json` has five groups; byte strings and scalars are lowercase hex, scalars 32-byte big-endian.
+Each vector has a `comment`, its inputs under `given`, and the values an implementation must compute under `expected`.
+The two `*_failure` groups have no `expected`: the call must fail.
 
-| Group | Inputs | Expected |
+| Group | `given` | `expected` |
 |---|---|---|
 | `valid` | `msk`, `e`, `m` | `b`, `B`, `ek`, `dk`, `E_bytes`, `c`, `K_c`, `K_q`, `K` |
-| `implicit_rejection` | `msk`, `E_bytes`, `c` | the `K` that `Decaps` returns |
-| `decaps_failure` | `msk`, `E_bytes`, `c` | `Decaps` fails |
-| `encaps_failure` | `B`, `ek`, `e`, `m` | `EncapsDerand` fails |
+| `encaps_valid` | `B`, `ek`, `e`, `m` | `E_bytes`, `c`, `K_c`, `K_q`, `K`, for an `ek` that `KeyGen` does not produce |
+| `implicit_rejection` | `msk`, `E_bytes`, `c` | the `K_c`, `K_q` and `K` that `Decaps` computes |
+| `decaps_failure` | `msk`, `E_bytes`, `c` | none; `Decaps` fails |
+| `encaps_failure` | `B`, `ek`, `e`, `m` | none; `EncapsDerand` fails |
 
 Regenerate with `.venv/bin/python gen_vectors.py`; output is deterministic.
 
