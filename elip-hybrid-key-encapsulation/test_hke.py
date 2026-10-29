@@ -135,9 +135,10 @@ def test_blinding_scalar_is_reduced_mod_n(monkeypatch):
     assert B == 5 * G
 
 
-def test_blinding_scalar_zero_fails(monkeypatch):
-    """KeyGen fails if b = 0. No real msk reaches this: it needs H_blind(msk) = n."""
-    monkeypatch.setattr(hke, "H_blind", lambda msk: n.to_bytes(32, "big"))
+@pytest.mark.parametrize("hash_value", [pytest.param(0, id="0"), pytest.param(n, id="n")])
+def test_blinding_scalar_zero_fails(monkeypatch, hash_value):
+    """KeyGen fails if b = 0. No real msk reaches this: it needs H_blind(msk) to be 0 or n."""
+    monkeypatch.setattr(hke, "H_blind", lambda msk: hash_value.to_bytes(32, "big"))
     with pytest.raises(HKEFailure):
         expandDecapsulationKey(bytes(32))
 
@@ -203,6 +204,14 @@ def test_encaps_derand_rejects_e_out_of_range(recipient, e):
     _, B, ek = recipient
     with pytest.raises(HKEFailure):
         EncapsDerand(B, ek, e, bytes(32))
+
+
+@pytest.mark.parametrize("length", [pytest.param(0, id="empty"), pytest.param(31, id="31"), pytest.param(33, id="33")])
+def test_encaps_derand_rejects_wrong_length_m(recipient, length):
+    """EncapsDerand rejects an m that is not 32 bytes, rather than failing inside the KEM."""
+    _, B, ek = recipient
+    with pytest.raises(HKEFailure):
+        EncapsDerand(B, ek, 1, bytes(length))
 
 
 @pytest.mark.parametrize("e", [pytest.param(1, id="1"), pytest.param(n - 1, id="n - 1")])

@@ -54,7 +54,7 @@ The reference implements only the HKE layer itself; both primitives come from ca
 - **Invalid public key:** every class of invalid `B_bytes` (empty, `O`, bad prefix, uncompressed, hybrid, wrong length, `X >= p`, `X` not on the curve) makes `Encaps` raise `HKEFailure`.
 - **Primitive wiring:** generator encodings, `lift`/`cbytes` round trip, `lift` rejecting 65-byte uncompressed and hybrid encodings and a non-canonical `X = p + 1` (which reduces to a valid x coordinate), and the tagged hash equal to the BIP340 formula for every tag.
 - **Encapsulation key check:** `Encaps` rejects an `ek` of the wrong length or with a coefficient `>= q`; `CheckEK` agrees with `kyber-py` on boundary values at the first and last coefficient of each polynomial, and ignores the last 32 bytes (`rho`).
-- **Ephemeral scalar:** `EncapsDerand` rejects `e` outside `[1, n-1]` (`0`, `n`, `n + 1`, `2^256 - 1`) and accepts both bounds.
+- **Ephemeral scalar:** `EncapsDerand` rejects `e` outside `[1, n-1]` (`0`, `n`, `n + 1`, `2^256 - 1`) and accepts both bounds; it also rejects an `m` that is not 32 bytes.
 - **Randomness:** with `secrets` replaced, `Encaps` equals `EncapsDerand` with `e = 1 + randbelow(n - 1)` and a 32-byte `m`, at the smallest and largest draw; `KeyGen` returns a 32-byte `msk`.
 - **Unreachable branches:** with `H_blind` replaced, `expandDecapsulationKey` reduces `H_blind(msk)` modulo `n` and fails on `b = 0`; no real `msk` reaches either, so no vector covers them.
 - **Invalid ciphertext, implicit rejection:** a tampered `c`, a different valid `E`, a ciphertext for another recipient, or `E` and `c` taken from different encapsulations all decapsulate without error to a wrong `K`; rejection is deterministic.
@@ -75,6 +75,19 @@ The two `*_failure` groups have no `expected`: the call must fail.
 | `encaps_failure` | `B`, `ek`, `e`, `m` | none; `EncapsDerand` fails |
 
 Regenerate with `.venv/bin/python gen_vectors.py`; output is deterministic.
+New `valid`, `encaps_valid` and `implicit_rejection` vectors are appended, so earlier ones keep their index.
+
+Each vector targets a mistake that an implementation could make, and each failure vector has exactly one invalid input.
+Beyond the generic cases, the vectors contain:
+
+- `e = 1` and `e = n - 1`, the ends of the range that `Encaps` draws from, and an all-zero `m`;
+- x coordinates of `B`, `E` and `e*B` that start with a zero byte, which catch an x encoded in fewer than 32 bytes, and a `K_c` and a `K_q` that start with a zero byte, which catch an implementation that does not handle them as fixed 32-byte strings;
+- an `ek` with coefficients `q - 1`, the largest valid value, and failing `ek`s with a coefficient `>= q` at both ends of each polynomial, or with the size of a valid ML-KEM-512 or ML-KEM-1024 key;
+- for both `E_bytes` and `B_bytes`, encodings that other decoders accept: SEC1's `0x00` for `O`, uncompressed and hybrid encodings (all three accepted by OpenSSL, the last two by `secp256k1_ec_pubkey_parse`), the x-only encoding, 33 zero bytes, a wrong prefix, `X >= p` that is valid mod `p`, `X` off the curve, and wrong lengths;
+- `e = 0`, `e = n` and values of `e` above `n`, and an `m` one byte short or too long;
+- each way to get a wrong `K` without a failure: a modified `c`, which the KEM rejects implicitly, a different `E` with an unmodified `c`, and a ciphertext for another recipient.
+
+No HKE vector reaches ML-KEM's rarely taken branches, such as SampleNTT reading more than 575 bytes of XOF output (probability 2^-38 per seed), since the KEM seeds are hashes of `msk`; an ML-KEM backend should also pass NIST's ACVP vectors, as `kyber-py` does in `test_mlkem_acvp.py`, and the C2SP CCTV and Wycheproof ML-KEM vectors.
 
 During development, the secp256k1 side of the vectors was cross-checked once against a hand-written pure-Python implementation and libsecp256k1, in addition to secp256k1lab.
 `K_q` and the implicit-rejection keys were additionally cross-checked once against PQClean's ML-KEM-768 (via `pqcrypto`).

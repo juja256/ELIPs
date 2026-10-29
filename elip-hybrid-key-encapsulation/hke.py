@@ -121,7 +121,7 @@ class KEM:
         """`CheckEK(ek) -> bool`: encapsulation key check (FIPS 203, §7.2).
 
         Type check `|ek| = L_ek`, then modulus check: every 12-bit coefficient
-        of `ByteDecode_12(ek[0 : L_ek - 32])` must be less than `q`.
+        in `ek[0 : L_ek - 32]` must be less than `q`.
         """
         if len(ek) != KEM.L_ek:
             return False
@@ -174,6 +174,8 @@ def EncapsDerand(B_bytes: bytes, ek: bytes, e: int, m: bytes):
         raise HKEFailure("ek fails the FIPS 203 encapsulation key check")
     if not 1 <= e <= n - 1:
         raise HKEFailure("e is not in [1, n-1]")
+    if len(m) != 32:
+        raise HKEFailure("|m| != 32")
     E = e * G
     E_bytes = cbytes(E)
     K_c = H_ecdh(cbytes(e * B))

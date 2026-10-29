@@ -9,6 +9,8 @@ import hashlib
 import json
 from pathlib import Path
 
+from kyber_py.ml_kem import ML_KEM_512, ML_KEM_1024
+
 from hke import (
     KEM,
     H_ecdh,
@@ -133,6 +135,10 @@ def decaps_failure_vector(comment: str, msk: bytes, E_bytes: bytes, c: bytes) ->
     raise AssertionError(f"Decaps did not fail: {comment}")
 
 
+def x_starts_with_zero(P) -> bool:
+    return cbytes(P)[1] == 0
+
+
 def encaps_failure_vector(comment: str, B: bytes, ek: bytes, e: int, m: bytes) -> dict:
     try:
         EncapsDerand(B, ek, e, m)
@@ -170,11 +176,27 @@ def invalid_encodings(P_bytes: bytes) -> list[tuple[str, bytes]]:
         ("34 bytes", P_bytes + b"\x00"),
         ("x = p + 1, which must not be reduced to the valid x = 1", x_ge_p()),
         ("x not on the curve", x_not_on_curve()),
+        ("x only (32 bytes), the BIP340 encoding", P_bytes[1:]),
+        ("33 zero bytes, which BIP327 decodes as the point at infinity", bytes(33)),
     ]
 
 
 def generate() -> dict:
     msk = [label(f"msk/{i}") for i in range(3)]
+    # Found by trying i = 0, 1, ...: the x coordinate of B, E and e*B, respectively,
+    # starts with a zero byte, which an encoding of x in fewer than 32 bytes drops;
+    # and K_c and K_q, respectively, start with a zero byte, which an implementation
+    # that does not handle them as fixed 32-byte strings may lose.
+    msk_lz = label("msk/844")
+    e_lz_E = scalar("e/x(E)/1136")
+    e_lz_eB = scalar("e/x(e*B)/167")
+    e_lz_Kc = scalar("e/K_c/167")
+    m_lz_Kq = label("m/K_q/100")
+    assert x_starts_with_zero(expandDecapsulationKey(msk_lz)[2])
+    assert x_starts_with_zero(e_lz_E * G)
+    assert x_starts_with_zero(e_lz_eB * expandDecapsulationKey(msk[2])[2])
+    assert H_ecdh(cbytes(e_lz_Kc * expandDecapsulationKey(msk[2])[2]))[0] == 0
+    assert KEM.Encaps_internal(expandDecapsulationKey(msk[1])[3], m_lz_Kq)[0][0] == 0
 
     # KeyGen, EncapsDerand and Decaps end to end.
     valid = [
@@ -183,6 +205,11 @@ def generate() -> dict:
         valid_vector("smallest e: e = 1, so E = G", msk[2], 1, label("m/2")),
         valid_vector("largest e: e = n - 1, so E = -G", msk[2], n - 1, label("m/3")),
         valid_vector("all-zero m", msk[0], scalar("e/4"), bytes(32)),
+        valid_vector("x(B) starts with a zero byte", msk_lz, scalar("e/5"), label("m/5")),
+        valid_vector("x(E) starts with a zero byte", msk[1], e_lz_E, label("m/6")),
+        valid_vector("x(e*B) starts with a zero byte", msk[2], e_lz_eB, label("m/7")),
+        valid_vector("K_c starts with a zero byte", msk[2], e_lz_Kc, label("m/8")),
+        valid_vector("K_q starts with a zero byte", msk[1], scalar("e/9"), m_lz_Kq),
     ]
 
     # The other groups change the first valid vector, so read back its values.
@@ -226,8 +253,13 @@ def generate() -> dict:
     ]
 
     # EncapsDerand must fail.
-    def encaps_fails(comment, B=B0, ek=ek0, e=e0):
-        return encaps_failure_vector(comment, B, ek, e, m0)
+    def encaps_fails(comment, B=B0, ek=ek0, e=e0, m=m0):
+        return encaps_failure_vector(comment, B, ek, e, m)
+
+    # Valid keys of the other ML-KEM parameter sets, which an implementation that
+    # picks the parameter set from |ek| would accept.
+    ek_512 = ML_KEM_512._keygen_internal(label("ML-KEM-512/d"), label("ML-KEM-512/z"))[0]
+    ek_1024 = ML_KEM_1024._keygen_internal(label("ML-KEM-1024/d"), label("ML-KEM-1024/z"))[0]
 
     def coefficient(i, value):
         return set_coefficient(ek0, i, value)
@@ -244,11 +276,15 @@ def generate() -> dict:
         encaps_fails("ek: coefficient 767 = q (last of polynomial 2)", ek=coefficient(767, q)),
         encaps_fails("ek: one byte short", ek=ek0[:-1]),
         encaps_fails("ek: one byte too long", ek=ek0 + b"\x00"),
+        encaps_fails("ek: a valid ML-KEM-512 key (800 bytes)", ek=ek_512),
+        encaps_fails("ek: a valid ML-KEM-1024 key (1568 bytes)", ek=ek_1024),
         *(encaps_fails(f"B: {what}", B=bad) for what, bad in invalid_encodings(B0)),
         encaps_fails("e: 0", e=0),
         encaps_fails("e: n, the group order", e=n),
         encaps_fails("e: n + 1, which must not be reduced to e = 1", e=n + 1),
         encaps_fails("e: 2^256 - 1, the largest 32-byte value", e=2**256 - 1),
+        encaps_fails("m: one byte short", m=m0[:-1]),
+        encaps_fails("m: one byte too long", m=m0 + b"\x00"),
     ]
 
     return {
